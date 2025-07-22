@@ -1,0 +1,919 @@
+---
+title: "Text Analytics Project"
+author: "Group 1"
+date: "2025-07-07"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+---
+
+## 1. Business Question
+
+What are the dominant topics and sentiments in customer reviews of top-ranked versus lower-ranked LA restaurants, and what lessons can restaurants learn to improve their rankings and overall reputation?
+
+## 2. Relevance
+
+This project will help restaurant owners and managers understand what sets highly ranked restaurants apart from those that are recommended but rank lower on Yelp. By analyzing the differences in topics and sentiment between the top 50 and bottom 50 restaurants on the list, we can uncover what delights customers at the very best restaurants — and what common pain points keep other spots from moving up the ranks. The insights can support decisions about menu improvements, service training, and marketing messaging to boost customer satisfaction and competitive positioning.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Load packages
+library(readr)
+library(tidyr)
+library(forcats)
+library(patchwork)
+library(word2vec)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(tm)
+library(quanteda)
+library(tidytext)
+library(textstem)
+library(syuzhet)
+library(ggplot2)
+library(textTinyR)
+library(lubridate)
+library(topicmodels)
+library(text2vec)
+library(vader)
+```
+
+```{r read data and update}
+#read data
+reviews <- read_csv("/Users/madelinelee/Downloads/top 240 restaurants recommanded in los angeles 2.csv")
+
+
+# Convert the date columns to Date type
+reviews <- reviews %>%
+  mutate(
+    CommentDate = as.Date(CommentDate, format = "%Y-%m-%d"),
+    Date = as.Date(Date, format = "%Y-%m-%d")
+  )
+
+# Convert selected columns to factor and add a new star rating factor column
+reviews <- reviews %>%
+  mutate(
+    RestaurantName = as.factor(RestaurantName),
+    Style = as.factor(Style)
+  )
+
+# Confirm
+str(reviews)
+summary(reviews)
+```
+```{r subset top 50 and bottom 50 restruants}
+# Define Top 50 and Bottom 50 groups
+reviews <- reviews %>%
+  mutate(
+    RankGroup = case_when(
+      Rank >= 1 & Rank <= 50 ~ "Top",
+      Rank >= 191 & Rank <= 240 ~ "Bottom",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(RankGroup)) %>%
+  mutate(RankGroup = as.factor(RankGroup))
+
+# Confirm counts
+table(reviews$RankGroup)
+
+```
+```{r clean and tokenize text}
+# Preprocess text
+reviews <- reviews %>%
+  mutate(
+    clean_text = str_to_lower(Comment),
+    clean_text = str_replace_all(clean_text, "[[:punct:]]", ""),
+    clean_text = str_replace_all(clean_text, "[0-9]", "")
+  )
+
+# Tokenize
+tokens <- reviews %>%
+  unnest_tokens(word, clean_text)
+
+# Remove stopwords
+data("stop_words")
+tokens <- tokens %>%
+  anti_join(stop_words, by = "word")
+
+# Lemmatize
+tokens <- tokens %>%
+  mutate(lemma = lemmatize_words(word))
+
+```
+
+```{r word frequencies}
+# Word counts for Top 50
+top_words <- tokens %>%
+  filter(RankGroup == "Top") %>%
+  count(lemma, sort = TRUE)
+
+# Word counts for Bottom 50
+bottom_words <- tokens %>%
+  filter(RankGroup == "Bottom") %>%
+  count(lemma, sort = TRUE)
+
+# Plot Top 50
+top_words %>%
+  slice_max(n, n = 15) %>%
+  ggplot(aes(reorder(lemma, n), n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top Words in Top 50 Restaurants",
+       x = "Word",
+       y = "Frequency")
+
+# Plot Bottom 50
+bottom_words %>%
+  slice_max(n, n = 15) %>%
+  ggplot(aes(reorder(lemma, n), n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top Words in Bottom 50 Restaurants",
+       x = "Word",
+       y = "Frequency")
+
+```
+```{r positive and negative words}
+# Load tidytext lexicon: Bing (as in Module 3)
+bing <- get_sentiments("bing")
+
+# Make sure you're using the same 'tokens' object:
+# tokens = tokens %>% mutate(lemma = lemmatize_words(word))
+
+# Join the Bing lexicon to get polarity
+tokens_sentiment <- tokens %>%
+  inner_join(bing, by = c("lemma" = "word"))
+
+# Create POSITIVE word table
+positive_words <- tokens_sentiment %>%
+  filter(sentiment == "positive") %>%
+  group_by(RankGroup, lemma) %>%
+  summarise(word_count = n()) %>%
+  arrange(desc(word_count))
+
+# Create NEGATIVE word table
+negative_words <- tokens_sentiment %>%
+  filter(sentiment == "negative") %>%
+  group_by(RankGroup, lemma) %>%
+  summarise(word_count = n()) %>%
+  arrange(desc(word_count))
+
+# Check top positive words
+positive_words %>% group_by(RankGroup) %>% slice_max(word_count, n = 10)
+
+# Check top negative words
+negative_words %>% group_by(RankGroup) %>% slice_max(word_count, n = 10)
+
+# Take top 10 positive words by RankGroup
+top_pos <- positive_words %>%
+  group_by(RankGroup) %>%
+  slice_max(word_count, n = 10)
+
+# Plot
+ggplot(top_pos, aes(x = reorder(lemma, word_count), y = word_count, fill = RankGroup)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ RankGroup, scales = "free_y") +
+  coord_flip() +
+  labs(
+    title = "Top Positive Words by Rank Group",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+# Take top 10 negative words by RankGroup
+top_neg <- negative_words %>%
+  group_by(RankGroup) %>%
+  slice_max(word_count, n = 10)
+
+# Plot
+ggplot(top_neg, aes(x = reorder(lemma, word_count), y = word_count, fill = RankGroup)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ RankGroup, scales = "free_y") +
+  coord_flip() +
+  labs(
+    title = "Top Negative Words by Rank Group",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+
+```
+
+```{r sentiment}
+# Get sentiment
+reviews$sentiment <- get_sentiment(reviews$Comment, method = "syuzhet")
+
+# Average sentiment by RankGroup
+reviews %>%
+  group_by(RankGroup) %>%
+  summarise(avg_sentiment = mean(sentiment))
+
+# Boxplot
+ggplot(reviews, aes(x = RankGroup, y = sentiment)) +
+  geom_boxplot() +
+  labs(title = "Sentiment: Top 50 vs Bottom 50 Restaurants",
+       x = "Rank Group",
+       y = "Sentiment Score")
+ggplot(reviews, aes(x = sentiment, fill = RankGroup)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Sentiment Score Distribution: Top 50 vs Bottom 50",
+    x = "Sentiment Score",
+    y = "Density",
+    fill = "Rank Group"
+  ) +
+  theme_minimal()
+
+# Five-number summary for sentiment by RankGroup
+reviews %>%
+  group_by(RankGroup) %>%
+  summarise(
+    min_sentiment = min(sentiment, na.rm = TRUE),
+    Q1_sentiment = quantile(sentiment, 0.25, na.rm = TRUE),
+    median_sentiment = median(sentiment, na.rm = TRUE),
+    Q3_sentiment = quantile(sentiment, 0.75, na.rm = TRUE),
+    max_sentiment = max(sentiment, na.rm = TRUE)
+  )
+
+```
+```{r rank vs star rating}
+# Filter Top
+top_reviews <- reviews %>% filter(RankGroup == "Top")
+
+# Filter Bottom
+bottom_reviews <- reviews %>% filter(RankGroup == "Bottom")
+
+# Top 50 scatter
+plot_top <- ggplot(top_reviews, aes(x = Rank, y = StarRating)) +
+  geom_point(alpha = 0.4, color = "#0072B2") +
+  geom_smooth(method = "lm", se = TRUE, color = "#D55E00") +
+  labs(
+    title = "Star Rating vs Rank (Top 50 Restaurants)",
+    x = "Rank",
+    y = "Star Rating"
+  ) +
+  theme_minimal()
+
+# Bottom 50 scatter
+plot_bottom <- ggplot(bottom_reviews, aes(x = Rank, y = StarRating)) +
+  geom_point(alpha = 0.4, color = "#009E73") +
+  geom_smooth(method = "lm", se = TRUE, color = "#CC79A7") +
+  labs(
+    title = "Star Rating vs Rank (Bottom 50 Restaurants)",
+    x = "Rank",
+    y = "Star Rating"
+  ) +
+  theme_minimal()
+
+# Side by side using patchwork
+plot_top + plot_bottom
+
+```
+```{r average star rating by restruant top and bottom}
+# Calculate per-restaurant average for Top 50
+top_avg_stars <- reviews %>%
+  filter(RankGroup == "Top") %>%
+  group_by(RestaurantName) %>%
+  summarise(
+    avg_StarRating = mean(StarRating, na.rm = TRUE),
+    reviews_count = n()
+  ) %>%
+  arrange(desc(avg_StarRating))
+
+# Calculate per-restaurant average for Bottom 50
+bottom_avg_stars <- reviews %>%
+  filter(RankGroup == "Bottom") %>%
+  group_by(RestaurantName) %>%
+  summarise(
+    avg_StarRating = mean(StarRating, na.rm = TRUE),
+    reviews_count = n()
+  ) %>%
+  arrange(desc(avg_StarRating))
+
+# View
+head(top_avg_stars)
+head(bottom_avg_stars)
+
+#graph view
+
+# Top 50 dot plot
+plot_top_avg <- ggplot(top_avg_stars, aes(x = avg_StarRating, y = reorder(RestaurantName, avg_StarRating))) +
+  geom_point(color = "#0072B2", size = 2) +
+  labs(
+    title = "Average Star Rating per Restaurant (Top 50)",
+    x = "Average Star Rating",
+    y = "Restaurant"
+  ) +
+  theme_minimal()
+
+# Bottom 50 dot plot
+plot_bottom_avg <- ggplot(bottom_avg_stars, aes(x = avg_StarRating, y = reorder(RestaurantName, avg_StarRating))) +
+  geom_point(color = "#D55E00", size = 2) +
+  labs(
+    title = "Average Star Rating per Restaurant (Bottom 50)",
+    x = "Average Star Rating",
+    y = "Restaurant"
+  ) +
+  theme_minimal()
+
+# Show them side by side with patchwork
+plot_top_avg + plot_bottom_avg
+
+```
+```{r top 25 and bottom 25 for better view}
+# Create a new dataset: Top 25 and Bottom 25 only
+reviews_25 <- reviews %>%
+  mutate(
+    RankGroup25 = case_when(
+      Rank >= 1 & Rank <= 25 ~ "Top25",
+      Rank >= 216 & Rank <= 240 ~ "Bottom25",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(RankGroup25))
+
+# Top 25
+top25_avg_stars <- reviews_25 %>%
+  filter(RankGroup25 == "Top25") %>%
+  group_by(RestaurantName) %>%
+  summarise(
+    avg_StarRating = mean(StarRating, na.rm = TRUE),
+    reviews_count = n()
+  ) %>%
+  arrange(desc(avg_StarRating))
+
+# Bottom 25
+bottom25_avg_stars <- reviews_25 %>%
+  filter(RankGroup25 == "Bottom25") %>%
+  group_by(RestaurantName) %>%
+  summarise(
+    avg_StarRating = mean(StarRating, na.rm = TRUE),
+    reviews_count = n()
+  ) %>%
+  arrange(desc(avg_StarRating))
+
+# Make a clean new dataset for just Top 25 and Bottom 25
+reviews_25 <- reviews %>%
+  mutate(
+    RankGroup25 = case_when(
+      Rank >= 1 & Rank <= 25 ~ "Top25",
+      Rank >= 216 & Rank <= 240 ~ "Bottom25",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(RankGroup25))
+
+# Top 25 plot
+plot_top25 <- ggplot(top25_avg_stars, aes(x = avg_StarRating, y = reorder(RestaurantName, avg_StarRating))) +
+  geom_point(color = "#0072B2", size = 2) +
+  labs(
+    title = "Top 25 Restruants",
+    x = "Average Star Rating",
+    y = "Restaurant"
+  ) +
+  theme_minimal()
+
+# Bottom 25 plot
+plot_bottom25 <- ggplot(bottom25_avg_stars, aes(x = avg_StarRating, y = reorder(RestaurantName, avg_StarRating))) +
+  geom_point(color = "#D55E00", size = 2) +
+  labs(
+    title = "Bottom 25 Restruants",
+    x = "Average Star Rating",
+    y = "Restaurant"
+  ) +
+  theme_minimal()
+
+plot_top25 + plot_bottom25
+```
+
+
+
+
+```{r price by rank}
+
+# Make sure Price is factor with levels in order
+reviews <- reviews %>%
+  mutate(Price = factor(Price, levels = c("$", "$$", "$$$", "$$$$")))
+
+ggplot(reviews, aes(x = Price, fill = RankGroup)) +
+  geom_bar(position = "dodge") +
+  labs(
+    title = "Number of Restaurants by Price Level",
+    x = "Price Level",
+    y = "Count of Reviews",
+    fill = "Rank Group"
+  ) +
+  theme_minimal()
+
+
+```
+```{r top 50 and bottom 50 cuisine type}
+# 1️ Separate multi-cuisine rows
+reviews_long <- reviews %>%
+  separate_rows(Style, sep = ",\\s*") %>%
+  mutate(Style = stringr::str_trim(Style))
+
+# Top 50
+top_cuisine_counts <- reviews_long %>%
+  filter(RankGroup == "Top") %>%
+  group_by(Style) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(desc(count))
+
+# Bottom 50
+bottom_cuisine_counts <- reviews_long %>%
+  filter(RankGroup == "Bottom") %>%
+  group_by(Style) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(desc(count))
+
+# Top 50 plot
+plot_top50_cuisine <- ggplot(top_cuisine_counts, aes(x = reorder(Style, -count), y = count)) +
+  geom_col(fill = "#0072B2") +
+  labs(
+    title = "Cuisine Types in Top 50 Restaurants",
+    x = "Cuisine Type",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot_top50_cuisine
+
+# Bottom 50 plot
+plot_bottom50_cuisine <- ggplot(bottom_cuisine_counts, aes(x = reorder(Style, -count), y = count)) +
+  geom_col(fill = "#D55E00") +
+  labs(
+    title = "Cuisine Types in Bottom 50 Restaurants",
+    x = "Cuisine Type",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot_bottom50_cuisine
+
+
+```
+```{r change top 25 and bottom 25 cuisine type}
+# Count cuisine types by RankGroup
+cuisine_counts <- reviews_long %>%
+  group_by(RankGroup, Style) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  arrange(RankGroup, desc(count))
+
+# Top 50: 25 most common cuisines
+top50_top25_cuisines <- cuisine_counts %>%
+  filter(RankGroup == "Top") %>%
+  slice_max(order_by = count, n = 25)
+
+# Bottom 50: 25 most common cuisines
+bottom50_top25_cuisines <- cuisine_counts %>%
+  filter(RankGroup == "Bottom") %>%
+  slice_max(order_by = count, n = 25)
+
+# Top 50: Top 25 cuisines
+plot_top50_top25 <- ggplot(top50_top25_cuisines, aes(x = reorder(Style, -count), y = count)) +
+  geom_col(fill = "#0072B2") +
+  labs(
+    title = "Top 25 Cuisine Types in Top 50 Restaurants",
+    x = "Cuisine Type",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot_top50_top25
+
+# Bottom 50: Top 25 cuisines
+plot_bottom50_top25 <- ggplot(bottom50_top25_cuisines, aes(x = reorder(Style, -count), y = count)) +
+  geom_col(fill = "#D55E00") +
+  labs(
+    title = "Top 25 Cuisine Types in Bottom 50 Restaurants",
+    x = "Cuisine Type",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+plot_bottom50_top25
+
+```
+```{r topic modeling}
+# -------------------------------------------
+# Add unique doc_id for each review
+reviews <- reviews %>%
+  mutate(doc_id = paste(RestaurantName, row_number(), sep = "_"))
+
+# -------------------------------------------
+# Clean text (if needed)
+reviews <- reviews %>%
+  mutate(
+    clean_text = str_to_lower(Comment),
+    clean_text = str_replace_all(clean_text, "[[:punct:]]", ""),
+    clean_text = str_replace_all(clean_text, "[0-9]", "")
+  )
+
+# -------------------------------------------
+# Tidy tokens, remove stopwords, lemmatize
+data("stop_words")
+
+tidy_tokens <- reviews %>%
+  unnest_tokens(word, clean_text) %>%
+  anti_join(stop_words, by = "word") %>%
+  mutate(lemma = lemmatize_words(word))
+
+# -------------------------------------------
+# ----- TOP 50 only -----
+
+# Filter
+top_tokens <- tidy_tokens %>% filter(RankGroup == "Top")
+
+# Count
+top_counts <- top_tokens %>% count(doc_id, lemma)
+
+# DTM
+top_dtm <- top_counts %>% cast_dtm(document = doc_id, term = lemma, value = n)
+
+# LDA
+lda_top <- LDA(top_dtm, k = 5, control = list(seed = 1234))
+
+# Top terms
+topics_top <- tidy(lda_top, matrix = "beta")
+
+top_terms_top <- topics_top %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+print(top_terms_top)
+
+# Plot
+top_terms_top %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(
+    title = "Top Terms per Topic (Top 50 Reviews)",
+    x = "Term",
+    y = "Beta"
+  ) +
+  theme_minimal()
+
+# -------------------------------------------
+# ----- BOTTOM 50 only -----
+
+# Filter
+bottom_tokens <- tidy_tokens %>% filter(RankGroup == "Bottom")
+
+# Count
+bottom_counts <- bottom_tokens %>% count(doc_id, lemma)
+
+# DTM
+bottom_dtm <- bottom_counts %>% cast_dtm(document = doc_id, term = lemma, value = n)
+
+# LDA
+lda_bottom <- LDA(bottom_dtm, k = 5, control = list(seed = 1234))
+
+# Top terms
+topics_bottom <- tidy(lda_bottom, matrix = "beta")
+
+top_terms_bottom <- topics_bottom %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+print(top_terms_bottom)
+
+# Plot
+top_terms_bottom %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(
+    title = "Top Terms per Topic (Bottom 50 Reviews)",
+    x = "Term",
+    y = "Beta"
+  ) +
+  theme_minimal()
+
+```
+```{r TF-IDF}
+# Calculate TF-IDF using lemma
+tfidf_data <- tidy_tokens %>%
+  count(RankGroup, lemma, sort = TRUE) %>%
+  bind_tf_idf(term = lemma, document = RankGroup, n = n)
+
+# Visualize top 15 tf-idf terms for each group
+tfidf_data %>%
+  group_by(RankGroup) %>%
+  slice_max(tf_idf, n = 15) %>%
+  ungroup() %>%
+  mutate(lemma = reorder_within(lemma, tf_idf, RankGroup)) %>%
+  ggplot(aes(tf_idf, lemma, fill = RankGroup)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~RankGroup, scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Top TF-IDF Words by Rank Group",
+       x = "TF-IDF", y = "Word") +
+  theme_minimal()
+
+```
+```{r topic modeling: food vs service reviews}
+
+
+# ---- Extensive keyword lists ----
+food_keywords <- c(
+  "food", "dish", "meal", "flavor", "taste", "delicious", "tasty", "spicy", "bland", "savory",
+  "sweet", "salty", "sour", "bitter", "umami", "portion", "fresh", "raw", "overcooked",
+  "undercooked", "burnt", "juicy", "dry", "crunchy", "tender", "cooked", "menu", "cuisine",
+  "appetizer", "entree", "main", "side", "dessert", "drink", "cocktail", "beverage", "wine", "beer",
+  "ingredients", "presentation", "garnish", "plated", "texture", "chewy", "creamy", "crispy",
+  "soggy", "rich", "light", "balanced", "hearty", "bold", "flavorsome", "michelin", "fusion",
+  "organic", "artisanal", "locally", "grilled", "baked", "fried", "roasted", "seared", "sauce",
+  "buttery", "flaky", "pasta", "steak", "burger", "pizza", "noodle", "tuna", "salmon", "sushi",
+  "roll", "rice", "spice", "chicken", "beef", "pork", "vegan", "vegetarian", "egg", "cheese",
+  "brunch", "lunch", "dinner", "breakfast", "snack", "combo", "order", "plate", "bowl"
+)
+
+service_keywords <- c(
+  "service", "wait", "waiter", "waitress", "staff", "server", "host", "hostess", "bartender",
+  "attentive", "friendly", "rude", "slow", "quick", "prompt", "helpful", "professional", "welcoming",
+  "unfriendly", "apathetic", "inattentive", "refill", "check", "bill", "order", "table", "reservation",
+  "seated", "ignored", "greeted", "line", "queue", "attitude", "manners", "polite", "courteous",
+  "efficient", "customer", "tipped", "tip", "comp", "complimentary", "service charge", "accommodating",
+  "recommendation", "knowledgeable", "training", "timely", "rush", "delayed", "impatient", "welcomed",
+  "treated", "busboy", "cleaning", "management", "hosted", "interaction", "experience", "tablecloth",
+  "confirmation", "walk-in", "booking", "availability", "overbooked", "waitlist", "gathering",
+  "noise", "ambience", "lighting", "music", "greeting", "communication", "confused",
+  "mix-up", "accused", "apologize", "remake", "reorder", "overwhelmed", "complain", "manager"
+)
+
+# ---- Build regex patterns ----
+pattern_food <- paste(food_keywords, collapse = "|")
+pattern_service <- paste(service_keywords, collapse = "|")
+
+# ---- Filter reviews by theme ----
+reviews_food <- reviews %>% filter(str_detect(tolower(Comment), pattern_food))
+reviews_service <- reviews %>% filter(str_detect(tolower(Comment), pattern_service))
+
+# ---- Tokenize + lemmatize function ----
+prep_tokens <- function(df, group_label) {
+  df %>%
+    unnest_tokens(word, Comment) %>%
+    anti_join(stop_words, by = "word") %>%
+    mutate(
+      lemma = lemmatize_words(word),
+      doc_id = paste(RestaurantName, row_number(), sep = "_"),
+      theme_group = group_label
+    )
+}
+
+# ---- Prepare tokens ----
+tokens_food <- prep_tokens(reviews_food, "Food Reviews")
+tokens_service <- prep_tokens(reviews_service, "Service Reviews")
+
+# ---- Safe LDA wrapper ----
+safe_fit_lda_extract <- function(tokens_df, k = 4, top_n = 25) {
+  if (nrow(tokens_df) < 5) return(NULL)
+
+  dtm <- tokens_df %>%
+    count(doc_id, lemma) %>%
+    cast_dtm(document = doc_id, term = lemma, value = n)
+
+  if (nrow(dtm) < 4 | ncol(dtm) < 5) return(NULL)
+
+  lda_model <- LDA(dtm, k = k, control = list(seed = 42))
+
+  tidy(lda_model) %>%
+    group_by(topic) %>%
+    slice_max(beta, n = top_n, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(group = unique(tokens_df$theme_group) %||% "Unknown")
+}
+
+# ---- Run both models ----
+top_terms_list <- list(
+  safe_fit_lda_extract(tokens_food),
+  safe_fit_lda_extract(tokens_service)
+)
+
+# ---- Combine and clean results ----
+top_terms_all <- do.call(bind_rows, Filter(Negate(is.null), top_terms_list))
+
+if (!"group" %in% colnames(top_terms_all)) {
+  stop("Error: No valid topic model results found.")
+}
+
+top_terms_all$group[is.na(top_terms_all$group) | top_terms_all$group == ""] <- "Unknown"
+top_terms_all$group <- as.factor(top_terms_all$group)
+
+# ---- Separate data frames by theme ----
+top_food <- top_terms_all %>% filter(group == "Food Reviews")
+top_service <- top_terms_all %>% filter(group == "Service Reviews")
+
+# Function to plot each topic separately, showing topic number + top word
+plot_topics_separately <- function(df, theme_label = "Theme") {
+  topics <- unique(df$topic)
+  
+  for (t in topics) {
+    topic_df <- df %>% filter(topic == t)
+    
+    # Get the top word by beta value
+    top_word <- topic_df %>% slice_max(beta, n = 1) %>% pull(term)
+    
+    p <- ggplot(topic_df, aes(reorder(term, beta), beta)) +
+      geom_col(fill = "#5DADE2") +
+      coord_flip() +
+      labs(
+        title = paste("Topic", t, "-", theme_label, "→ Top Term:", top_word),
+        x = NULL,
+        y = "Beta (Topic-Term Probability)"
+      ) +
+      theme_minimal() +
+      theme(text = element_text(size = 14))
+    
+    print(p)
+  }
+}
+
+# ---- Call for each group ----
+plot_topics_separately(top_food, theme_label = "Food Reviews")
+plot_topics_separately(top_service, theme_label = "Service Reviews")
+
+
+```
+```{r word embedding}
+# ---- Step 1: Remove number-containing tokens ----
+tokens <- tokens %>%
+  filter(!str_detect(lemma, "\\d"))
+
+# ---- Step 2: Collapse Lemmas by RankGroup into Sentences ----
+prep_group_texts <- function(data, group_value) {
+  data %>%
+    filter(RankGroup == group_value) %>%
+    group_by(RestaurantName) %>%
+    summarise(text = paste(lemma, collapse = " "), .groups = "drop") %>%
+    mutate(text = trimws(text)) %>%
+    filter(!is.na(text), text != "", !is.nan(text), !is.null(text), nchar(text) > 10) %>%
+    pull(text) %>%
+    .[!is.na(.) & . != "" & !is.nan(.) & !is.null(.)]
+}
+
+top_texts <- prep_group_texts(tokens, "Top")
+bottom_texts <- prep_group_texts(tokens, "Bottom")
+
+# ---- Step 3: Train GloVe Word Embeddings (returns both matrix and vocab) ----
+prep_glove_model <- function(text_vector) {
+  it <- itoken(text_vector, tokenizer = word_tokenizer, progressbar = FALSE)
+  vocab <- create_vocabulary(it)
+  vectorizer <- vocab_vectorizer(vocab)
+  tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+
+  glove <- GlobalVectors$new(rank = 50, x_max = 10)
+  wv_main <- glove$fit_transform(tcm, n_iter = 20)
+  wv_context <- glove$components
+  word_vectors <- wv_main + t(wv_context)
+  rownames(word_vectors) <- vocab$term
+  return(list(embedding = word_vectors, vocab = vocab))
+}
+
+# ---- Train Top and Bottom Embeddings ----
+glove_top_out <- prep_glove_model(top_texts)
+glove_bottom_out <- prep_glove_model(bottom_texts)
+
+# ---- Plot Embeddings Colored by Word Category ----
+plot_glove_embedding_labeled <- function(embedding_matrix, vocab_df, title = "Word Embedding PCA", max_words = 100) {
+  top_terms <- vocab_df %>%
+    arrange(desc(term_count)) %>%
+    filter(term %in% rownames(embedding_matrix)) %>%
+    slice_head(n = max_words) %>%
+    pull(term)
+
+  embedding_matrix <- embedding_matrix[top_terms, ]
+  pca <- prcomp(embedding_matrix, scale. = TRUE)
+  df <- data.frame(
+    PC1 = pca$x[, 1],
+    PC2 = pca$x[, 2],
+    word = rownames(embedding_matrix)
+  ) %>%
+    mutate(
+      category = case_when(
+        word %in% food_keywords ~ "Food",
+        word %in% service_keywords ~ "Service",
+        TRUE ~ "Other"
+      )
+    )
+
+  ggplot(df, aes(x = PC1, y = PC2, label = word, color = category)) +
+    geom_text(size = 3, alpha = 0.8, show.legend = FALSE) +
+    scale_color_manual(values = c("Food" = "#1f78b4", "Service" = "#33a02c", "Other" = "gray60")) +
+    labs(
+      title = title,
+      x = "PC1: Semantic dimension (e.g. food vs. service, sentiment)",
+      y = "PC2: Semantic nuance (e.g. intensity, descriptiveness)"
+    ) +
+    theme_minimal()
+}
+
+# ---- Show Plots ----
+plot_glove_embedding_labeled(
+  glove_top_out$embedding,
+  glove_top_out$vocab,
+  title = "Top 50 Restaurant Reviews – Word Embedding PCA (Colored by Theme)"
+)
+
+plot_glove_embedding_labeled(
+  glove_bottom_out$embedding,
+  glove_bottom_out$vocab,
+  title = "Bottom 50 Restaurant Reviews – Word Embedding PCA (Colored by Theme)"
+)
+
+```
+
+## Summary of Key Insights
+
+### Word Frequency & Token Analysis
+- **Top 50 restaurants** frequently included words like *food*, *service*, *delicious*, *love*, *recommend*, and *attentive*, reflecting a focus on overall experience and quality.
+- **Bottom 50 restaurants** also emphasized *food* and *service*, but had more concrete menu-specific terms like *chicken*, *fry*, and *rice*, indicating a focus on individual dishes.
+- **Insight**: While both groups used similar positive words, Top 50 reviews highlighted experiential aspects like ambiance and service, whereas Bottom 50 reviews focused more on food items.
+
+### Sentiment Lexicon (Bing)
+- **Top positive words**: Shared words between both groups included *delicious*, *love*, *recommend*, and *amaze*. Top 50 reviews uniquely featured *attentive*, *fresh*, and *friendly*.
+- **Top negative words**: Bottom 50 reviews contained stronger negative language like *disappoint*, *bland*, *cold*, *rude*, and *expensive*. Top 50 reviews had fewer and milder negative terms.
+- **Insight**: The Top 50 are distinguished not by a higher volume of positive words, but by fewer and less severe negative words, along with more focus on service and freshness.
+
+### Sentiment Score Analysis
+- The **average sentiment score** was identical for both groups (4.08), but the Bottom 50 had a wider distribution with more extreme lows.
+- **Insight**: Top-ranked restaurants generated consistently positive reviews, while bottom-ranked restaurants received more polarized feedback, suggesting inconsistent customer experiences.
+
+### Star Ratings vs Rank
+- **Top 50** restaurants had star ratings clustered tightly between 4.4 and 5, showing a slight improvement with higher ranks.
+- **Bottom 50** restaurants had a wider spread of ratings, with some restaurants scoring high despite low ranks.
+- **Insight**: Yelp ranking is not solely based on star rating—other factors like volume, recency, or sentiment distribution may contribute.
+
+### Price Level Analysis
+- **Top 50** restaurants were more commonly in higher price tiers ("3 $" and "4 $").
+- **Bottom 50** were more represented in lower tiers ("1 $" and "2 $").
+- **Insight**: Higher-ranking restaurants are typically more expensive but receive consistent praise, suggesting that customers perceive them as worth the price.
+
+### Cuisine Type Distribution
+- **Top 50** restaurants were concentrated in upscale or trendy categories like Korean, New American, Fusion, and Cocktail Bars.
+- **Bottom 50** restaurants were more varied, with more casual or fast-casual categories such as Chicken Shops, Sandwiches, Burgers, and Pop-ups.
+- **Insight**: Top-ranked restaurants often offer more distinctive or elevated dining experiences, while lower-ranked ones may be less differentiated.
+
+### Interpretation of Shared Positive Words
+- Words like *love*, *delicious*, and *amaze* appeared frequently in both groups.
+- **However**, Top 50 reviews included additional descriptors like *attentive* and *fresh*, pointing to a broader appreciation for service and quality, not just taste.
+
+### TF-IDF Analysis
+
+- The analysis calculated TF-IDF scores separately for the Top 50 and Bottom 50 reviews.
+- **Top 50 reviews** had high TF-IDF terms like *brunch*, *cocktail*, *vibe*, *reservation*, and *pasta*, indicating that these reviews emphasize elevated dining experiences, social atmosphere, and trendiness.
+- **Bottom 50 reviews** surfaced distinct TF-IDF terms such as *oyster*, *break*, *toast*, *stew*, and *miss*, pointing to more casual, item-focused content or dissatisfaction.
+- **Insight**: Top 50 restaurants are associated with words that reflect a more curated and intentional dining experience, while Bottom 50 restaurants show a more disjointed mix of niche dishes and potential service issues.
+
+---
+
+### Word Embeddings (PCA Visualization)
+
+- Word embeddings were trained and visualized **separately** for Top 50 and Bottom 50 review text using PCA.
+- **Top 50 embeddings** formed clear thematic clusters such as:
+  - Food quality and flavor: *delicious*, *taste*, *pasta*, *flavor*, *fresh*  
+  - Service and ambiance: *attentive*, *friendly*, *vibe*, *brunch*, *date*, *cocktail*  
+  - Emotional responses: *love*, *recommend*, *amaze*, *perfect*
+- **Bottom 50 embeddings** showed:
+  - Overlapping clusters of generic praise (*delicious*, *nice*) and critiques (*bland*, *cold*, *disappoint*)
+  - Less separation between food and service themes
+- **Insight**: Top 50 reviews used more distinct and consistent language to describe food, service, and experience, while Bottom 50 reviews lacked semantic clarity, suggesting greater variability in customer experience.
+
+---
+
+### Topic Modeling (LDA)
+
+- Separate LDA models were run for the Top 50 and Bottom 50 reviews (k = 5).
+- **Top 50 Topics** included:
+  - Topic 1: *noodle*, *spicy*, *menu*, *recommend*, *experience*
+  - Topic 2: *pasta*, *love*, *delicious*, *drink*, *service*
+  - Topic 3: *ambiance*, *cocktail*, *brunch*, *vibe*, *reservation*
+  - Topics often captured distinct aspects of the full dining experience.
+- **Bottom 50 Topics** included:
+  - Topic 1: *food*, *time*, *service*, *restaurant*, *experience*
+  - Topic 2: *wait*, *cold*, *bland*, *miss*, *table*
+  - Topics were more diffuse, with several overlapping on generic or negative experiences.
+- **Insight**: Top 50 topics were more specific and multifaceted, reflecting quality and variety. Bottom 50 topics were more generalized and service-problem-heavy, reinforcing the difference in review quality and content.
+
+---
+
+
