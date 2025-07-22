@@ -81,7 +81,7 @@ The following files are included in the project submission:
 - `Group1_Project.Rmd` – Full RMarkdown code notebook
 - `Group1_Project.knit.html` – HTML output of analysis
 - `Group1_Final_Report.pdf` – Written report of findings
-- `Group1_Presentation.pdf` – Final slide deck presentation
+- `MKTG 6640 Final Project - Group 1.pdf` – Final slide deck presentation
 - `top 240 restaurants recommended in los angeles 2.csv` – Yelp review dataset
 
 Make sure all files are saved in the same working directory for full reproducibility.
